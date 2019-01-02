@@ -1,0 +1,699 @@
+---
+title: "STAT 428 Project: Google Stock Prediction"
+author: "Group_16: Khuong Le - kmle2 (group leader), Han Sun - hansun3, Xin Sun - xins2, Xinyi Song - xinyis8, Xinye Yang - xinyey2"
+date: " December 13th, 2018"
+output: 
+  html_document:
+    css: style.css
+---
+
+```{r, warning=FALSE, message=FALSE, include=FALSE}
+#Run this code before knit. Runblock only 1 time whenever start R to get the packages installed and read!
+pkg_list = c("ggplot2", "boot", "bootstrap", "tidyr", "dplyr", "stringr", "scales", "plyr", "tibble", "reshape2", "dgof", "CDFt")
+mia_pkgs = pkg_list[!(pkg_list %in% installed.packages()[,"Package"])]
+if(length(mia_pkgs) > 0) install.packages(mia_pkgs)
+loaded_pkgs = lapply(pkg_list, require, character.only=TRUE)
+```
+
+```{r, include=FALSE}
+# Setting up the dataset:
+gg_stock = read.csv("gg_stock.csv")
+head(gg_stock)
+```
+
+```{r, include=FALSE}
+#Reformatting and cleaning data.
+#Adding average in day and difference between open and close and also their adjusted value.
+gg_stock = add_column(gg_stock, Average    = (gg_stock$High + gg_stock$Low)/2, .after = "Low")
+gg_stock = add_column(gg_stock, Difference = (gg_stock$Close - gg_stock$Open), .after = "Close")
+gg_stock = add_column(gg_stock, Adj..Average    = (gg_stock$Adj..High + gg_stock$Adj..Low)/2, .after = "Adj..Low")
+gg_stock = add_column(gg_stock, Adj..Difference = (gg_stock$Adj..Close - gg_stock$Adj..Open), .after = "Adj..Close")
+#Profit: This value returns 1 if the difference in both Difference and Adj..Difference is True, else it's 0.
+for (i in 1:nrow(gg_stock)){
+  if ((gg_stock$Difference[i] >= 0 && gg_stock$Adj..Difference[i] >= 0) == TRUE){
+    gg_stock$Profit[i] = 1
+  }
+  else{
+    gg_stock$Profit[i] = 0 
+  }
+}
+#Splitting date into Day - Month -Year:
+
+for (i in 1:nrow(gg_stock)){
+  gg_stock$Day[i]   = str_split(gg_stock$Date[i], "-")[[1]][3]
+  gg_stock$Month[i] = str_split(gg_stock$Date[i], "-")[[1]][2]
+  gg_stock$Year[i]  = str_split(gg_stock$Date[i], "-")[[1]][1]
+}
+#Not  going to use Ex.Dividend and Split.Radio.
+drops = c("Ex.Dividend", "Split.Ratio", "Date")
+gg_stock = gg_stock[,!(names(gg_stock) %in% drops)]
+gg_stock = gg_stock[c(16,17,18,seq(1,15))]
+```
+
+#**Abstract**
+Stock price prediction is useful in analyzing financial and business activity such as rational decision and risk management. In this project, we try to use Monte Carlo Simulation and Geometric Brownian Motion to simulate samples, capture the randomness of stock price and use the Google stock price data from 2004 to 2015 to predict the stock price of 2016. After that, we use Leave-One-Out Cross Validation (Jacknife) to test the model by comparing their Mean Square Error(MSE). The results show that adding Geometric Brownian motion gives better stock price prediction and by comparing our predicted values with actual stock price values, we find that they have very similar trend although they are not exactly same, which shows that our methods make sense and can be effective. However, there is still a lot factors worth consideration such as autoregression of observations and ways to deal with limitations of our methods. 
+
+#**1. Introduction**
+  Stock price prediction is of great significance in financial and business activity. On the one hand, stock price prediction can give investors references to make decision; on the other hand, stock price prediction can provide much information such as market intrinsic value and even whole economic situation. 
+
+  In our project, we use some statistical computing methods to predict the Google stock price. For instance, Monte Carlo is using random samples of parameters to explore the behavior of a complex system or process. Due to its randomness and the power in data extrapolation, it is a good approach in prediction. Besides, the stock price behavior shows "Brownian motion", thus some properties of the stock price can be derived from those of the Geometric Brownian motion.  
+
+  Our aim is to predict the Google stock price. The original data set comes from kaggle which contains Google Stock price from the year 2004 up to 2017 with 13 variables. We use daily open and close price to calculate average price, analyze them and plot them . Here are the plot of average price of each year versus date:
+```{r, include=FALSE}
+Yearsq = seq(2004, 2017,1)
+df = data.frame(Year = Yearsq, Month_max = 0, Day_max = 0, Stock_max = 0, Month_min = 0, Day_min =0, Stock_min = 0, Month_max_diff = 0, Day_max_diff = 0)
+#df$Stock_max[i] <- 
+for (i in 1:14){
+ newdatai        <- subset(gg_stock, gg_stock$Year==Yearsq[i])
+ df$Stock_max[i] <- max(newdatai$Average) #i-year, stock_max_i is the maximum value of average price of year i
+ df$Month_max[i] <- newdatai$Month[which(newdatai$Average==max(newdatai$Average))] # month of the the maximum value of average price of year i
+ df$Day_max[i]   <- newdatai$Day[which(newdatai$Average==max(newdatai$Average))]#day of the the maximum value of average price of year i
+# #max_average_i<-cbind(i,month_max_i,day_max_i,stock_max_i)
+df$Stock_min[i] <-min(newdatai$Average)#i-year, stock_max_i is the minimum value of average price of year i
+df$Month_min[i] <-newdatai$Month[which(newdatai$Average==min(newdatai$Average))]
+# month of the the minimum value of average price of year i
+df$Day_min[i]   <-newdatai$Day[which(newdatai$Average==min(newdatai$Average))]
+# day of the the minimum value of average price of year
+#df$Stock_min[i] <-cbind(i,month_min_i,day_min_i,stock_min_i)
+stock_maxchange_i<-max(newdatai$Difference)#i-year, stock_maxchange_i is the maximum value of price difference of year i
+df$Month_max_diff[i] <-newdatai$Month[which(newdatai$Difference==max(newdatai$Difference))]# month of maximum value of price difference of year i
+df$Day_max_diff[i] <-newdatai$Day[which(newdatai$Difference==max(newdatai$Difference))] #day of maximum value of price difference of year i
+#max_difference_i<-cbind(i,month_maxchange_i,day_maxchange_i,stock_maxchange_i)
+# #print(cbind(max_average_i,min_average_i,max_difference_i))
+ }
+df
+```
+
+```{r, echo=FALSE, fig.align="center"}
+gg_stock2  <- gg_stock %>% group_by(Month, Year) %>% dplyr::summarise(average = mean(Average))
+ggplot(gg_stock2, aes(Month, average, group = Year, color = Year)) + geom_line() + geom_point() + ggtitle("Average stock value from August 2004 to 2016")
+```
+
+From the figure above, the trend of Google stock price is similar in different years except for the 2014 due to Google split. Besides, the trend also follows the economic cycle. For instance, from the plot we can see that at the end of year 2008, the stock price after reaching the peak value of that year, its value dropped to historical lowest value at that time because of downward economic situation. Therefore, when we do prediction, we take these factors into consideration. 
+
+For our data, we split it into two part: training data and test data. We use the training data(2004$\sim$2013) to find our distribution. Since the 2014 is an abnormal year, we will skip it and use the data of 2015 to predict the stock price of 2016, and compare how well our prediction is.
+
+#**2. Method**
+##**2.1 Calculate log_return**
+
+  The rate of return is the net gain or loss on an investment over a specified time period, and the logarithm of the return for the stock price normally follows the normal distribution. The formula of the log_return is:
+$$
+log\_return=log\left( \frac{P_{t}}{P_{t-1}} \right)
+$$
+where $P_{t}$ is the stock price at time t, and $P_{t-1}$ is the stock price at time t-1.
+
+  Since normal distribution is easy to study and analysis, we will generate random sample for log_return and transform it back to stock price at time t using the formula:
+$$
+P_t = e^{log\_return} P_{t-1} 
+$$
+
+```{r, include = FALSE}
+# Add a column of Log Return(Since the Log Return of the stock price follow normal distribution).
+df_test = gg_stock
+df_test$log_return = 0
+for (i in 2:nrow(gg_stock)){
+  df_test$log_return[i] = log(df_test$Average[i]/df_test$Average[i-1])
+}
+```
+
+```{r, include = FALSE}
+# Divide the dataset into two, one for traing and one for test
+data_traing = subset(df_test, Year <= 2013 , select=c(Day, Year, Average, log_return))
+data_test = subset(df_test, df_test$Year >= 2015, select=c(Day, Year, Average, log_return))
+```
+
+##**2.2	Find best fit distribution**
+
+  In order to find the best fit distribution, we calculate the *Maximum Likelihood Estimator* for the parameter:
+$$
+l(\mu,\sigma) = -\frac{n}{2}log(2\pi\sigma^2) - \frac{1}{2\sigma^2}\sum_{i=1}^n (x_i - \mu)^2
+$$
+And get the result:
+
+result| $\mu$   | $\sigma$
+:---: | :-----: | :-------------:
+MLE   | 0.00092 | 0.01835
+
+To compare the MLE, we also plot several different density curves, observing which line fit our data better.
+```{r, include=FALSE}
+# Calculate unbiased mean and sd for the data
+sd_log = sd(data_traing$log_return)
+mean_log = mean(data_traing$log_return)
+
+#Finding MLE for mean and sd
+normalF <- function(par) {
+  # Log of likelihood of a normal distribution
+  # par[1] - mean
+  # par[2] - standard deviation
+  # x - set of observations. Should be initialized before MLE
+  x = data_traing$log_return
+  l = sum (-0.5* log(2 * pi * par[2]^2) - 0.5*(x - par[1])^2/par[2]^2 )
+  return(-l)
+}
+
+MLE = optim(c(mean_log, sd_log), # initial values for mu and sigma
+            fn = normalF # function to maximize
+            #method = "L-BFGS-B", # this method lets set lower bounds
+            #lower = 0.00001 # lower limit for parameters
+)
+```
+
+```{r, echo=FALSE, fig.align="center"}
+#Plot the distribution of training dataset
+hist(data_traing$log_return, xlim = c(-0.05,0.05), breaks = 100, probability = T, main = 'log_return distribution', xlab = 'log_return')
+#Find the best fit normal distribution
+x = seq(min(data_traing$log_return), max(data_traing$log_return), 0.001)
+sd_range = seq(0.01,0.014,0.001)
+cl = rainbow(5)
+for (i in 1:5) {
+  lines(x, dnorm(x, mean_log, sd_range[i]), col = cl[i])
+}
+lines(x, dnorm(x, MLE$par[1], MLE$par[2]), col = 'black')
+legend(-0.05,30, as.character(c(seq(0.01,0.014,0.001), 'MLE')), col = c(cl,'black'), lwd=2.5)
+```
+
+  From visualizing the plot, MLE seems not gives better result: it covers more data in two sides and thus most of our data are inside the range but it misses large data in the middle part.
+  To further test which parameter gives better fitness, we use Cramer-Von and Kolmogorov-Smirnov test, and get the following result:
+```{r, include=FALSE}
+set.seed(16)
+num_of_samples = length(data_traing$log_return)
+y <- rnorm(num_of_samples, MLE$par[1], 0.014)
+y1 <- rnorm(num_of_samples, MLE$par[1], MLE$par[2])
+result = ks.test(data_traing$log_return, y)
+reslt1 = CramerVonMisesTwoSamples(data_traing$log_return,y)
+pval1 = 1/6*exp(-reslt1)
+result2 = ks.test(data_traing$log_return, y1)
+reslt21 = CramerVonMisesTwoSamples(data_traing$log_return,y1)
+pval21 = 1/6*exp(-reslt21)
+c(pval1, result, pval21, result2)
+```
+
+Test              | Cramer-Von Test | Kolmogorov-Smirnov Test  
+:---------------: | :--------------:| :---------------------: 
+$\sigma = 0.014$  |    0.0965       |      0.02227 
+$\sigma = MLE$    |   0.003638      |   2.038677e-09
+
+It seems that when $\sigma = 0.014$, it has lager p-value, which means it does not reject the null hypothesis and distribution fits well. So we will use this distribution for following sample generation.
+
+
+##**2.3 Random number generation for log_return**
+
+We use the *accept-rejection method* to generate our sample data from normal distribution with
+
+target density: $f(x) \sim N(0.0009, 0.01835^2)$
+           
+instrumental density: $g(x) \sim Cauchy(0,1)$
+           
+But the algorithm runs really slow. To increase the efficiency, we just generate normal distribution from rnorm() function built in R in the further part.
+```{r, include=FALSE}
+#A/R method generate f~N(0.000926,0.01835^2)
+fg = function(x) {((1/sqrt(2*pi*MLE$par[2]^2)*exp(-(x-MLE$par[1])^2/(2*MLE$par[2]^2))))/(1/pi/(1+x^2))}
+temp = optimize(fg, c(-100,100),maximum = TRUE)
+M = temp$maximum
+randnorm <- function(n){
+  i <- 0; N <- 0
+  z <- rep(0, times = n)
+  while(i < n){ 
+    x <- tan(pi*(runif(1) - 0.5))  
+    u <- runif(1)                  
+    f <- (1/sqrt(2*pi*MLE$par[2]^2)*exp(-(x-MLE$par[1])^2/(2*MLE$par[2]^2)))   
+    g <- 1/pi/(1+x^2) 
+    
+    if (u <= f/M/g){ 
+      i <- i + 1
+      z[i] <- x 
+    }
+    
+    N <- N + 1 
+  }
+  list(z = z, accept = n/N)
+}
+tmp <- randnorm(2000)
+hist(tmp[[1]], breaks=100, freq=F)
+x = seq(min(tmp$z), max(tmp$z), 0.001)
+lines(x, dnorm(x, MLE$par[1], MLE$par[2]))
+```
+
+##**2.4 Stock Price Predicting**
+
+To have a better idea of the data, let's first look at our Average stock price and log_return for everyday:
+```{r, echo = FALSE, fig.width = 9, fig.align="center"}
+par(mfrow = c(1,2))
+# Plot the price
+plot(data_traing$Average, type = "l", main = "Day versus Average price", xlab = 'Day', ylab = "Average price")
+# Plot the log return
+plot(data_traing$log_return, type = "l", main = "Day versus log_return", xlab = 'Day', ylab = "log_return")
+```
+
+To predict the stock price for the future year, we will use three different methods and compare which one has better result.
+
+**Method 1 : Basic Normal**
+
+We found the distribution of log_return of training data, and by using *Monte Carlo Simulation*, we generate 365 samples from this distribution as predicted log_return values. Using the formula of transformation from the log_return values and price, we calculate the predicting stock price. Repeat this process ten times and then we get ten lines for reference and comparison.
+
+$$
+log\_return=log\left( \frac{P_{t}}{P_{t-1}} \right)
+$$
+
+```{r, echo = FALSE, fig.align="center"}
+# Method1: to predict the trend for the next year. 
+# Description: we first generate 365 numbers from the distribution we found previous, which is
+# our log_return. Then we calculate the stock price using the log_return value. Plot the
+# predicted price we get. Repeat the process 10 times.
+S = matrix(0, 10, 366)
+S[, 1] = 782.825
+for (i in 1:10) {
+  log_return = rnorm(365, 0.0009, 0.014)
+  for (j in (2:366)) {
+    S[i, j] = exp(log_return[j-1]) * S[i, j-1]
+  }
+}
+
+X = seq(1, 366, 1)
+price2 = data.frame(X,t(S))
+df <- melt(price2, id.vars="X")
+ggplot(df, aes(X, value, col=variable)) + geom_line()
+```
+
+**Method 2: Geometric Brownian Motion Method** 
+
+A geometric Brownian motion (GBM) is a continuous-time stochastic process in which the logarithm of the randomly varying quantity follows a Brownian motion with drift:
+$$S(t) = S_0 e^{X(t)}$$
+where $X(t) = \sigma B(t) + \mu t$ and $S_0$ is the initial value.
+
+And looking at the log_returns:
+$$dQ_t = d(logS_t) = (\mu -0.5 \times \sigma^2)dt + \sigma dB(t)$$
+Here, $\mu -0.5 \times \sigma^2$ gives us the **drift** of log_return and $\sigma$ represents the percentage **volatility**. $B(t)$ represents the Brownian Motion process that the stock price follows. In our project, we generated random variable z, a number corresponding to the distance between the mean and the events, expressed as the number of standard deviations.
+
+Thus, we calculate our daily log_return using formula:
+$$
+daily\_log\_return = exp(drift + \sigma \times qnorm(runif(365, 0, 1)))
+$$
+
+```{r, echo=FALSE, fig.align="center"}
+# Method2: to predict the trend for the next year.
+# Description: We use the Monte Carlo Simulation to predict the trend. First find the
+# log_return. And use the Brownian motion model for the daily return value. Then calculate
+# price. Plot them. Repeat for 10 times.
+
+# Calculate the mean and variance of log return
+log_return = data_traing$log_return
+log_mean = mean(log_return)
+log_var = var(log_return)
+drift = log_mean - (0.5 * log_var)
+stdev = sd(log_return)
+daily_returns = vector()
+
+k = 10
+S = matrix(0, k, 365)
+S[, 1] = 782.825
+for (i in 1:k) {
+  x = runif(365,0,1) #Generate 365 number in [0,1)
+  Z = qnorm(x)       
+  daily_returns = exp(drift + stdev * Z)
+  for (j in 2:length(daily_returns)) {
+    S[i, j] = S[i, j - 1] * daily_returns[j]
+  }
+}
+
+x = seq(1,365,1)
+price = data.frame(x, t(S))
+df2 <- melt(price, id.vars="x")
+ggplot(df2, aes(x, value, col=variable)) + geom_line()
+```
+
+**Method 3: Predicting stock price for future year by Using Monte Carlo**
+
+Use *Monte Carlo* to predict the stock price. Based on the log_return generated from the normal distribution we found, we calculate the stock price. And then we repeat this process for 1000 times and calculate the mean of them:
+
+$$
+\hat P_{t}= \overline {g(t)}=\frac{1}{m} \sum_{i=1}^mg(t)
+$$
+
+However, this is not practical. After plotting the predicted price, we found that the predicted price values almost resulted in a straight increasing trend line. This is because we generate a large number of the data, and based on the Weak Law of Large Numbers their mean values converge to the true mean, which cause the slope to be a constant number after transformation. Here, the slope of the line is $e^{\overline {log \_ return}}$
+```{r, echo=FALSE, fig.align="center"}
+# Method4: Find the predicted stock price for future year (Using Monte Carlo)
+# Description: Not accurate(failed method). We calculate the stock price for the next year,
+# based on the log_return we generated from normal distribution. Then repeated the process 
+# for 1000 times and calculated mean. As the plot shows, the predicted price results in an
+# almost-straight line. This is because we gernerate a large number of the data, and it
+# convergences to the mean of the data, which cause the slope to be a constant number.
+price=vector()
+price[1] = 782.825
+for (j in 1:365){
+  simuprice=vector()
+  for (i in 1:1000){
+    log_return_vec=rnorm(1, 0.0009, 0.01)
+    simuprice[i]=exp(log_return_vec)*price[j]
+  }
+  price[j+1]=mean(simuprice)
+}
+plot(price, type="l")
+```
+
+## **2.5 Improving prediction**
+
+For this part, we will use *Leave-One-Out Cross-Validation* to choose the model that will fit close to the actual value and also compare with the results of our stock price predicting to choose better model in group 1 method.
+
+```{r, include=FALSE}
+# Since we have some non-continous in the date value so we have this function call "daycount" to 
+# get the index of the day in the year. 
+daycount = function(xvalue){
+ini = 0
+ret = rep(0, 250)
+ret[1] = xvalue[1]
+for (i in 2:250){
+  if(xvalue[i-1] > xvalue[i]){
+    ini = ini + 1
+    ret[i] = ini*30 + xvalue[i]
+  }
+  else{
+    ret[i] = ret[i] + ini*30 + xvalue[i]
+  }
+}
+#print(length(ret))
+return (ret)
+}
+```
+
+Set up the Leave-one-out Cross Validation (Jacknife) to Estimate the mse of different models and compare them. As we already know, there are many models that we can choose from. After testing different models, we end up choosing 4 models : 
+
+Cubic: $Y = \beta_0 + \beta_1*X + \beta_2*X^2 + \beta_3*X^3 + e$
+
+Quadratic: $Y = \beta_0 + \beta_1*X + \beta_2*X^2 + e$
+
+Exponential Log: $log(Y) = \beta_0 + \beta_1*X + e$
+  
+Log - Log: $log(Y) = \beta_0 + \beta_1*log(X) + e$
+
+```{r, include=FALSE}
+data_2015 =subset(data_traing, Year == 2012, 
+select=c(Average))
+
+day_x = subset(data_traing, Year == 2012, 
+select=c(Day))
+
+xvalue = as.numeric(day_x$Day)
+ret = daycount(xvalue)
+
+data_2016 =subset(data_traing, Year == 2013, 
+select=c(Average))
+
+day_x6 = subset(data_traing, Year == 2013, 
+select=c(Day))
+ret6 = daycount( as.numeric(day_x6$Day))
+
+# Do the cross validation on given data
+n =length(data_2015)
+e1 = e2 = e3 =e4 = numeric(n)
+
+for (k in 1:n){
+   y = data_2015$Average[-k]
+   x = ret[-k]
+
+  J1 = lm(y ~ x + I(x^2) +I(x^3))
+  yhat1 = J1$coef[1]+J1$coef[2] * ret[k] +  J1$coef[3]*ret[k]^2 +  J1$coef[4]*ret[k]^3
+  e1[k] = data_2015[k] - yhat1
+
+  J2 = lm(y~ x +I(x^2))
+  yhat2 = J2$coef[1]+J2$coef[2] * ret[k]+ J2$coef[3]*ret[k]^2
+  e2[k] = data_2015[k] - yhat2
+  
+  J3 = lm(log(y)~ x)
+  logyhat3 = J3$coef[1] + J3$coef[2] * ret[k]
+  yhat3 = exp(logyhat3)
+  e3[k] = data_2015[k] - yhat3
+  
+J4 <- lm(log(y) ~ log(x))
+logyhat4 <- J4$coef[1] + J4$coef[2]*log(ret[k])
+yhat4=exp(logyhat4)
+e4[k] <- data_2015[k] - yhat4
+  
+}
+J2
+
+c(mean(e1[[1]]^2),
+mean(e2[[1]]^2), mean(e3[[1]]^2), mean(e4[[1]]^2))
+
+predictedy1 = NULL
+count =1;
+for (i in ret[250]:(ret[250]+364)){
+  predictedy1[count] = J1$coefficients[1] + J1$coefficients[2]*i+J1$coefficients[3]*i^2 + J1$coefficients[3]*i^3
+  count = count+1
+}
+
+predictedy = NULL
+count1 =1;
+for (i in ret[250]:(ret[250]+364)){
+  predictedy[count1] = J2$coefficients[1] + J2$coefficients[2]*i + J2$coefficients[3]*i^2 
+  count1 = count1 + 1
+}
+```
+We get the MSE for four models as following:
+
+Model | Cubic      | Quadratic  | Exponential Log  | Log - Log
+:---: | :-------:  | :-------:  | :--------------: |:--------------:
+MLE   | 2812.066   | 3617.841   |   6296.206       | 12525.193
+
+As the result shows, the first two model have smaller MSE, so we will use plot to further compare these two.
+
+```{r, echo=FALSE, fig.width=9}
+par(mfrow=c(1,3))
+plot(predictedy, main = "Quadratic function")
+plot(ret6, data_2016$Average[(1:250)], col = 'red')
+plot(predictedy1, main = "Cubic function")
+```
+
+As we can see from the graph, it looks like the quadratic model is a better model although Mean Square Errors(MSE) of the cubic model seems like a better choice because our fitted value works well with the actual value from the dataset.
+
+```{r, include=FALSE}
+# These are some function to support our models in comparing with the actual data.
+# "best_fit": calculate the distances between each points of the two datasets
+# "select_fit": calculate the sum of square
+best_fit = function(f1, f2){
+  # f1 is prediction, f2 is actual
+  square_errors  = (f1 - f2)^2
+  qwerty = sum(square_errors)
+  return (qwerty)
+}
+
+select_fit = function(ax,ay,py){
+  c= 1
+  square_e = vector()
+  for (i in ax){
+    square_e[c]  = (ay[c]-py[i])^2
+    c = c+1
+    
+  }
+  return(sum(square_e))
+}
+
+```
+
+Now, we will use the quadratic model to compare our predictions in Stock Price Predicting section. Basically, we will calculate two parameters to compare the 20 predicting lines in the previous parts (10 generated from Method1 and Method2 respectively): *accept* and *accept2*. *accept* is the variable that stores the predicting line which has the least square error with the quadratic model; and *accept2* stores the predicting line which is the most close to the true value. If accept and accept2 are equal, it means that given the past year's data, our predict model successfully select the best result from the given predict lines that generated by Method 1(Basic Normal) and Method 2(GBM), which is closest to the real data. We will repeat the process for 1000 times and see which method has better accept rate. Meanwhile, we will find the predicting line with largest *accept* and this line is the best predicting line. The following is the result.
+```{r, include=FALSE}
+# prepare the actual data for test
+testdata_x = as.numeric(day_x6$Day)
+testdata_y = as.numeric(data_2016$Average)
+testdata_x = daycount(testdata_x)
+
+testfunc = function(price_data){
+  
+  res = vector()
+  price_1 = price_data$X1
+  price_2 = price_data$X2
+  price_3 = price_data$X3
+  price_4 = price_data$X4
+  price_5 = price_data$X5
+  price_6 = price_data$X6
+  price_7 = price_data$X7
+  price_8 = price_data$X8
+  price_9 = price_data$X9
+  price_10 = price_data$X10
+  
+ 
+  res[1] = select_fit(testdata_x,testdata_y,price_1)
+  res[2] = select_fit(testdata_x,testdata_y,price_2)
+  res[3] = select_fit(testdata_x,testdata_y,price_3)
+  res[4] = select_fit(testdata_x,testdata_y,price_4)
+  res[5] = select_fit(testdata_x,testdata_y,price_5)
+  res[6] = select_fit(testdata_x,testdata_y,price_6)
+  res[7] = select_fit(testdata_x,testdata_y,price_7)
+  res[8] = select_fit(testdata_x,testdata_y,price_8)
+  res[9] = select_fit(testdata_x,testdata_y,price_9)
+  res[10] = select_fit(testdata_x,testdata_y,price_10)
+  
+  return(which.min(res))
+}
+
+```
+
+```{r, include = FALSE}
+#set.seed(16)
+#Get the best fit Method:
+fit_graph = function(price_df){
+qwerty = vector()
+qwerty[1] = best_fit(price_df$X1, price_df$X11 )
+qwerty[2] = best_fit(price_df$X2, price_df$X11 )
+qwerty[3] = best_fit(price_df$X3, price_df$X11 )
+qwerty[4] = best_fit(price_df$X4, price_df$X11 )
+qwerty[5] = best_fit(price_df$X5, price_df$X11 )
+qwerty[6] = best_fit(price_df$X6, price_df$X11 )
+qwerty[7] = best_fit(price_df$X7, price_df$X11 )
+qwerty[8] = best_fit(price_df$X8, price_df$X11 )
+qwerty[9] = best_fit(price_df$X9, price$X11 )
+qwerty[10] = best_fit(price_df$X10, price_df$X11 )
+ret = which.min(qwerty) # Take 1st plot
+  return (ret)
+}
+```
+
+For Method 1(Basic Normal):
+```{r, echo=FALSE}
+#Method 1 best fit
+#set.seed(16)
+accept = vector()
+accept2 = vector()
+for (z in 1:1000){
+S = matrix(0, 10, 365)
+S[, 1] = 782.825
+for (i in 1:10) {
+  log_return = rnorm(365, 0.0009, 0.014)
+  for (j in (2:365)) {
+    S[i, j] = exp(log_return[j-1]) * S[i, j-1]
+  }
+}
+
+ X = seq(1, 365, 1)
+ price = data.frame(X,t(S))
+ price$X11 = predictedy
+ accept[z] = fit_graph(price)
+ accept2[z] = testfunc(price)
+}
+
+acc_rate = sum(accept==accept2)
+cat("accept rate for Method 1(Basic Normal) = ", acc_rate/1000)
+sort(table(accept),decreasing=TRUE)[1:3]
+```
+
+
+
+```{r, echo=FALSE, fig.align="center"}
+dfcp = price[c("X", "X1", "X2", "X3", "X4", "X5", "X6","X7","X8","X9","X10","X11")]
+dfcp2 <- melt(dfcp, id.vars="X")
+ggplot(dfcp2, aes(X, value, col=variable)) + geom_line()
+#The fittest one posisible is 9 with 12.8 %
+```
+
+For Method 2(With Brownian Motion):
+```{r, echo=FALSE}
+#set.seed(16)
+accept = vector()
+accept2 = vector()
+for (z in 1:1000){
+ log_return = data_traing$log_return
+ log_mean = mean(log_return)
+ log_var = var(log_return)
+ drift = log_mean - (0.5 * log_var)
+ stdev = sd(log_return)
+ daily_returns = vector()
+
+ k = 10
+ S = matrix(0, k, 365)
+ S[, 1] = 782.825
+ for (i in 1:k) {
+   x = runif(365,0,1) #Generate 365 number in [0,1)
+   Z = qnorm(x)
+   daily_returns = exp(drift + stdev * Z)
+   for (j in 2:length(daily_returns)) {
+     S[i, j] = S[i, j - 1] * daily_returns[j]
+   }
+ }
+
+ x = seq(1,365,1)
+ price = data.frame(x, t(S))
+ price$X11 = predictedy
+ accept[z] = fit_graph(price)
+ accept2[z] = testfunc(price)
+ 
+}
+
+acc_rate = sum(accept == accept2)
+cat("accept rate for Method 2(With Brownian Motion) = ", acc_rate/1000)
+a = sort(table(accept),decreasing=TRUE)[1:3]
+a
+```
+
+```{r, echo=FALSE, fig.align="center"}
+dfcp = price[c("x", "X1", "X2", "X3", "X4", "X5", "X6","X7","X8","X9","X10","X11")]
+dfcp2 <- melt(dfcp, id.vars="x")
+ggplot(dfcp2, aes(x, value, col=variable)) + geom_line()
+#The fittest one possible is 2 with 11.8 %
+```
+
+#3. Result
+
+```{r, echo=FALSE, fig.align="center"}
+plot(predictedy, xlab="Day", ylab="price")
+points(ret6, data_2016$Average[(1:250)], col = 'red')
+legend("topleft", as.character(c("cubic model", "true data")), col = c('black','red'), pch = 1)
+```
+
+According to the result, we can see that our predicted value from quadratic model are closed to the actual values in the first half of the year. In the second half, around 200 to 300 our precdicted values keeps going up whereas the actual value is on changing much but the overall trend looks much similar. There exists many factors that affects the economics so that it won't increase as expected and may suffer from suddenly price drop. From 300 and till the end, we can clearly see that the trend of the actual value going up in same direction as our trend so we can say that our predicted value in some way works.
+
+Now we will compare everything together. 
+```{r, echo=FALSE, fig.align="center"}
+dfcp = price[c("x", colnames(price[as.numeric(names(a[1]))+1]), "X11")]
+df3 <- data.frame(ret6, data_2016$Average[(1:250)])
+colnames(df3) <- c("x1", "y1")
+dfcp2 <- melt(dfcp, id.vars="x")
+ggplot() + geom_line(data = dfcp2, mapping = aes(x, value, col=variable)) + geom_point(mapping = aes(x = x1, y = y1, col='true data'), data = df3) + scale_color_manual(labels = c("true data", "model", "prediction line"), values = c("hotpink", "turquoise2", "springgreen4"))
+#The fittest one possible is 2 with 11.8 %
+```
+
+This plot shows three things: our predict model based on the past year to predict the next year; our predicted line for 2016; and the true data in 2016. As the plot shows, our predicted line is in similar pattern as true data and our model, though not accurate, but also has same trend as true data. So we can say that our prediction is successful in some degree.
+
+Besides, from the results of our algorithm, we have more than 24% success rate that our predict function makes the same choice as real test data does. The p-value is much larger than 10% which indicates that our algorithm really makes a good help in predicting future stock values. 
+
+In addition, our training data for building the model is one year, so our model reflect the end-of-year result more correct than the middle of year. From the plot of our predicted model and actual data, for each year, we expect to see the difference within 10% of the stock value at the end. However, in order to test possibility of making best prediction in every day during next year, we choose to compute least squares for all the 365 data points which lower our success rate. We find that there's some suddenly drop and increase in the middle of year which may due to specific and unpredictable reasons, but in the long-term, our model is making a very good prediction.
+
+As a conclusion, our algorithm makes a good help to predict stock value by choosing the most possible result from candidate pool generated by *Method 2(GBM)*. Since our model is based on past year's data, it works much better when predict the stock price at the end of next year and it also shows substantive effect in predicting everyday stock value throughout the year. As a reflection, this algorithm works best when length of training data approximate equals length of test data. Which means in order to predict stock price X days later, we can build our predict model based on corresponding X days interval in past data.
+
+#4. Discussion
+
+We finally come up with our own method for predicting stock and also checked for its correctness. We only analyze and predict for the stock value in 2016 because different years will required different models because one models can't be a good fit for every year.
+Also, we can't make the predicted value as close to the actual values because there are some limitations in this datasets. We have to skips many days in a year because in the dataset it doesn't have the stock value for it. Adding into that, it's hard to predict a data without reference. So we come up with some Random generate methods to work.
+
+For Stock Predicting Price section, after figuring the distribution of historical log_return, we use Monte Carlo simulation to generate samples from this distribution and repeat it for ten times. Monte Carlo allows for a wider variety of scenarios than the rather limited historical data can provide(Wikipedia). Meanwhile, generating different paths of Monte Carlo simulation provides an opportunity to observe a wider variety of log_return sequences that support a deeper perspective about possible retirement outcomes. However, they do not reflect other characteristics of the historical data which are not incorporated into the assumptions. For instance, Monte Carlo simulation do not incorporate mean reversion guided by market valuations, economic cycle and so on. They treat each data independently. We have to say that time series analysis model is important in stock price prediction for it captures the autocorrelation between the observations of different days, but we don't do it due to unfamiliarity with time series analysis. Instead, we use the Geometric Brownian Motion(GBM) since the trend of stock price is like 'random walk' and stock price will never be negative. Geometric Brownian motion will be better than general Brownian motion since the latter one can be negative. After combining the Monte Carlo simulation and Brownian motion, we get better results verified in the Improving prediction section.
+
+For the Improving prediction section, we want to make sure that our Stock price predicting actually do what it suppose to do. We decided to use Cross-Validation methods to find Mean Squared Errors (MSE) : $MSE = E[\hat{\theta}-\theta]^2$ because we think MSE is a good tools to measure the errors and find the best fit models. Since there are many holes in data and not many functions in R that can help us to find the lines we want, we write many different helper functions for it which takes a while for everything to work. We had to test many different models and then we ran into an interesting situation that we find a models with smallest MSE values however, the predicted values are way off comparing to actual values. Then we decide to choose the next smallest one (which is our chosen models) we find out that it fits good enough in our models. After finding the fittest model, we ran into a problem that we need the lines in Stock price predicting section that close to the lines in this section. There are many lines that looks close to our lines but in overall, all it is not that close. After calculating, the line we find out closest is not as expected but it's reasonable since most of the points are closed to each other.
+
+
+
+#**Appendix**
+[1] Maria L.Rizzo. Statistical Computing with R. Chapman & Hall/CRC, 2008.
+
+[2] P.J.Bickel. A distribution free version of the Smirnov two-sample test in the multivariate case. Annals of Mathematical Statistics, 40:1-23.
+
+[3] Iliya Valchanov. How to apply Monte Carlo simulation to forecast Stock prices using Python, 2017.
+
+[4] Ross, Sheldon M. (2014). "Variations on Brownian Motion". Introduction to Probability Models (11th ed.). Amsterdam: Elsevier. pp. 612-14. ISBN 978-0-12-407948-9.
+
+[5] M. J. Crawley. Statistical Computing: An Introduction to Data Analysis using S-Plus. Wiley, New York, 2002.
+
+[6] R. O. Duda, P. E. Hart, and D. G. Stork. Pattern Classification. Wiley, New York, second edition, 2001.
+
+[7] B. Efron. Bootstrap methods: another look at the jackknife. Annals of Statistics, 7:1-26, 1979.
+
+[8] B. Efron. The Jackknife, the Bootstrap and Other Resampling Plans. Society for Industrial and Applied Mathematics, Philadelphia, 1982.
+
+[9] M. Evans and T. Schwartz. Approximating Integrals via Monte Carlo and Deterministic Methods. Oxford University Press, Oxford, 2000.
+
+[10] B. Everitt and T. Hothorn. A Handbook of Statistical Analyses Using R. Chapman & Hall/CRC, Boca Raton, FL, 2006.
+
+[11] G. S. Fishman. Monte Carlo Concepts, Algorithms, and Applications.
+Springer, New York, 1995.
+
+[12]Kroese, D. P.; Brereton, T.; Taimre, T.; Botev, Z. I. (2014). "Why the Monte Carlo method is so important today". WIREs Comput Stat. 6 (6): 386-392. doi:10.1002/wics.1314.
+
+[13]Snyman, J.A.; Wilke, D.N. (2018). Practical Mathematical Optimization - Basic Optimization Theory and Gradient-Based Algorithms. Springer Optimization and Its Applications Vol. 133 (2 ed.). Springer International Publishing. pp. xxvi+372. ISBN 978-3-319-77585-2.
